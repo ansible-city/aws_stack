@@ -1,0 +1,276 @@
+---
+
+Description: Simple appliation stack
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  CIDR:
+    Type: String
+  Environment:
+    Description: Environment name
+    Type: String
+  EnvironmentConfig:
+    Description: Environment configuration
+    Type: String
+  KeyName:
+    Type: String
+  ImageId:
+    Description: API AMI ID
+    Type: AWS::EC2::Image::Id
+  InstanceCount:
+    Default: 1
+    Description: Number of EC2 instances to launch
+    Type: Number
+  InstanceMaxSize:
+    Default: 3
+    Type: Number
+  InstanceMinSize:
+    Default: 1
+    Type: Number
+  InstanceMonitoring:
+    Description: Should the detailed instance monitoring be enabled
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+    ConstraintDescription: must be a true or false.
+  InstanceType:
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - m3.medium
+      - c1.medium
+    ConstraintDescription: must be a valid EC2 instance type.
+    Default: t2.micro
+    Description: Elasticsearch EC2 instance type
+    Type: String
+  RoleName:
+    AllowedPattern: "[a-zA-Z0-9][a-z-A-Z0-9-]*"
+    ConstraintDescription: "Only alphanumeric and '-' characters are allowed"
+    Description: Name of the application/role of the stack
+    Type: String
+  WhitelistSg:
+    Type: String
+
+Resources:
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable access to Server
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${Environment}-vpc-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp:
+            Ref: CIDR
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${Environment}-${RoleName}"
+        - Key: Role
+          Value:
+            Ref: RoleName
+
+  ElbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable access to ELB
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${Environment}-vpc-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 433
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${Environment}-${RoleName}-elb"
+        - Key: Role
+          Value:
+            Ref: RoleName
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        Fn::Split:
+          - ","
+          - Fn::ImportValue:
+              Fn::Sub: "${Environment}-vpc-SubnetsPrivate"
+      LaunchConfigurationName:
+        Ref: LaunchConfig
+      MinSize:
+        Ref: InstanceMinSize
+      MaxSize:
+        Ref: InstanceMaxSize
+      DesiredCapacity:
+        Ref: InstanceCount
+      LoadBalancerNames:
+        - Ref: Elb
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${Environment}-${RoleName}"
+          PropagateAtLaunch: true
+        - Key: Role
+          Value:
+            Ref: RoleName
+          PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Count: 0
+        Timeout: PT10M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT3M
+        WaitOnResourceSignals: false
+
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: PercentChangeInCapacity
+      AutoScalingGroupName:
+        Ref: AutoScalingGroup
+      Cooldown: 600
+      ScalingAdjustment: 100
+
+  ScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName:
+        Ref: AutoScalingGroup
+      Cooldown: 900
+      ScalingAdjustment: -1
+
+  CPUAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Ref: ScaleUpPolicy
+      AlarmDescription: Scale-up if CPU > 50% for 3 minutes
+      EvaluationPeriods: 3
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Period: 60
+      Statistic: Average
+      Threshold: 50
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Ref: AutoScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+
+  CPUAlarmLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scale-down if CPU < 30% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 10
+      Threshold: 30
+      AlarmActions:
+        - Ref: ScaleDownPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Ref: AutoScalingGroup
+      ComparisonOperator: LessThanThreshold
+
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            "/bootstrap/environment.yml":
+              content:
+                Ref: EnvironmentConfig
+              mode: '000644'
+              owner: root
+              group: root
+    Properties:
+      AssociatePublicIpAddress: false
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize: 8
+      ImageId:
+        Ref: ImageId
+      InstanceType:
+        Ref: InstanceType
+      KeyName:
+        Ref: KeyName
+      SecurityGroups:
+        - Ref: Sg
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #!/bin/bash
+            /bootstrap/bootstrap_aws 'LaunchConfig' 'AutoScalingGroup' \
+                '${AWS::Region}' '${AWS::StackName}' '${RoleName}'
+
+  Elb:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      CrossZone: true
+      HealthCheck:
+        HealthyThreshold: 2
+        Interval: 30
+        Target: HTTP:80/healthcheck
+        Timeout: 2
+        UnhealthyThreshold: 3
+      Listeners:
+        - InstancePort: 80
+          InstanceProtocol: HTTP
+          LoadBalancerPort: 80
+          Protocol: HTTP
+      Scheme: internet-facing
+      SecurityGroups:
+        - Ref: WhitelistSg
+      Subnets:
+        Fn::Split:
+          - ","
+          - Fn::ImportValue:
+              Fn::Sub: "${Environment}-vpc-SubnetsPublic"
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${Environment}-${RoleName}"
+        - Key: Role
+          Value:
+            Ref: RoleName
+
+  # URL will be based on role. For instance my-app.dev.company.net
+  ELBDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Comment:
+        Fn::Sub: "${RoleName} application entry"
+      HostedZoneId:
+        Fn::ImportValue:
+          Fn::Sub: "${Environment}-public-dns-ZoneId"
+      Name:
+        Fn::Join:
+          - .
+          -
+            - Ref: RoleName
+            - Fn::ImportValue:
+                Fn::Sub: "${Environment}-public-dns-FQDN"
+      Type: CNAME
+      TTL: 1800
+      ResourceRecords:
+        - Fn::GetAtt:
+          - Elb
+          - DNSName

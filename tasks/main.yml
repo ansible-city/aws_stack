@@ -1,0 +1,33 @@
+---
+
+- name: "Describe foundation VPC stack"
+  cloudformation_facts:
+    stack_name: "{{ env }}-vpc"
+
+- name: Ensure Internet facing security group
+  ec2_group:
+    name: "{{ env }}-{{ aws_stack.name }}-elb"
+    description: "Internet facing security group for {{ aws_stack.name }}"
+    vpc_id: "{{ vars.cloudformation[env + '-vpc'].stack_outputs.VpcId }}"
+    rules: "{{ aws_stack.public_whitelist }}"
+  register: sg_facts
+
+- name: Ensure Stack
+  cloudformation:
+    stack_name: "{{ env }}-{{ aws_stack.name | replace('_', '-') }}"
+    state: "{{ aws_stack.state }}"
+    template: "{{ role_path }}/files/stack_{{ aws_stack.type }}.yml"
+    template_parameters:
+      CIDR: "{{ aws_stack.cidr }}"
+      Environment: "{{ env }}"
+      EnvironmentConfig: "--- { }"
+      WhitelistSg: "{{ sg_facts.group_id }}"
+      RoleName: "{{ aws_stack.name }}"
+      ImageId: "{{ aws_stack.ami_id }}"
+      KeyName: "wojtek.oledzki"
+    tags:
+      environment: "{{ env }}"
+      role: "{{ aws_stack.name }}"
+      Description: "VPC stack for {{ aws_stack.name }} application"
+      Name: "{{ env }}-{{ aws_stack.name }}"
+  register: vpc_data

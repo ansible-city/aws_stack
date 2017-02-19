@@ -1,0 +1,15 @@
+---
+
+aws_stack:
+  name: example
+  type: simple
+  state: present
+  ami_id: ~
+  instance_type: t2.micro
+  cidr: 0.0.0.0/0
+  availability_zones: [ ]
+  public_whitelist:
+    - proto: tcp
+      from_port: 80
+      to_port: 80
+      cidr_ip: 0.0.0.0/0
